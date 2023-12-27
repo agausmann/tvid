@@ -5,6 +5,7 @@
 
 pub mod pixel_grid;
 
+use image::{imageops::blur, GenericImageView, Luma};
 pub use pixel_grid::PixelGrid;
 
 use petgraph::visit::{Data, EdgeRef, GraphBase, IntoEdgeReferences, NodeIndexable};
@@ -21,6 +22,12 @@ enum ComponentSlot {
     There(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PixelCoordinate {
+    pub x: u32,
+    pub y: u32,
+}
+
 #[non_exhaustive]
 pub struct Segmentation {
     /// Map from node indexes to component indexes
@@ -30,9 +37,10 @@ pub struct Segmentation {
     pub components: Vec<Component>,
 }
 
-pub fn segment<G>(graph: &G, k: f32) -> Segmentation
+pub fn segment<'a, G>(graph: &'a G, k: f32) -> Segmentation
 where
-    G: GraphBase + Data<EdgeWeight = f32> + NodeIndexable + IntoEdgeReferences,
+    G: GraphBase + Data<EdgeWeight = f32> + NodeIndexable,
+    &'a G: GraphBase<NodeId = G::NodeId> + IntoEdgeReferences + Data<EdgeWeight = f32>,
 {
     // Component storage, and also mapping node indexes to components.
     let mut components = vec![
@@ -61,7 +69,7 @@ where
     }
 
     // Sort E by non-decreasing edge weight.
-    let mut queue: Vec<G::EdgeRef> = graph.edge_references().collect();
+    let mut queue: Vec<_> = graph.edge_references().collect();
     queue.sort_by(|a, b| {
         a.weight()
             .partial_cmp(b.weight())
@@ -125,4 +133,23 @@ where
         node_components: out_node_components,
         components: out_components,
     }
+}
+
+/// Standard pipeline:
+///
+/// - Gaussian blur (using `sigma` factor)
+/// - Pixel grid image representation
+pub fn gbis<I>(image: &I, sigma: f32, k: f32) -> Vec<Vec<PixelCoordinate>>
+where
+    I: GenericImageView<Pixel = Luma<u8>>,
+{
+    let blurred = blur(image, sigma);
+    let view = PixelGrid(blurred);
+    let segmentation = segment(&view, k);
+
+    let mut components = vec![Vec::new(); segmentation.components.len()];
+    for (i_pixel, &i_component) in segmentation.node_components.iter().enumerate() {
+        components[i_component].push(view.from_index(i_pixel));
+    }
+    components
 }

@@ -1,6 +1,8 @@
 use image::{GenericImageView, Luma};
 use petgraph::visit::{Data, GraphBase, IntoEdgeReferences, NodeIndexable};
 
+use super::PixelCoordinate;
+
 /// Represent an image as a graph where pixels are nodes and edges are created
 /// between each pixel and the 8 pixels surrounding it.
 ///
@@ -13,7 +15,7 @@ where
     I: GenericImageView<Pixel = Luma<u8>>,
 {
     type EdgeId = Edge;
-    type NodeId = Coordinate;
+    type NodeId = PixelCoordinate;
 }
 
 impl<I> Data for PixelGrid<I>
@@ -37,7 +39,7 @@ where
     }
 
     fn from_index(&self, i: usize) -> Self::NodeId {
-        Coordinate {
+        PixelCoordinate {
             x: (i % self.0.width() as usize) as u32,
             y: (i / self.0.width() as usize) as u32,
         }
@@ -54,7 +56,7 @@ where
     fn edge_references(self) -> Self::EdgeReferences {
         let mut output = Vec::new();
         for (x, y, _) in self.0.pixels() {
-            let base = Coordinate { x, y };
+            let base = PixelCoordinate { x, y };
 
             if x < self.0.width() - 1 {
                 output.push(EdgeRef::new(
@@ -98,14 +100,8 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Coordinate {
-    pub x: u32,
-    pub y: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Edge {
-    base: Coordinate,
+    base: PixelCoordinate,
     neighbor: Neighbor,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,15 +113,15 @@ pub enum Neighbor {
 }
 
 impl Neighbor {
-    fn apply(&self, c: Coordinate) -> Coordinate {
+    fn apply(&self, c: PixelCoordinate) -> PixelCoordinate {
         match self {
-            Self::Down => Coordinate { x: c.x, y: c.y + 1 },
-            Self::Right => Coordinate { x: c.x + 1, y: c.y },
-            Self::DownRight => Coordinate {
+            Self::Down => PixelCoordinate { x: c.x, y: c.y + 1 },
+            Self::Right => PixelCoordinate { x: c.x + 1, y: c.y },
+            Self::DownRight => PixelCoordinate {
                 x: c.x + 1,
                 y: c.y + 1,
             },
-            Self::DownLeft => Coordinate {
+            Self::DownLeft => PixelCoordinate {
                 x: c.x - 1,
                 y: c.y + 1,
             },
@@ -168,7 +164,7 @@ impl<'a, I> petgraph::visit::EdgeRef for EdgeRef<'a, I>
 where
     I: GenericImageView<Pixel = Luma<u8>>,
 {
-    type NodeId = Coordinate;
+    type NodeId = PixelCoordinate;
     type EdgeId = Edge;
     type Weight = f32;
 
