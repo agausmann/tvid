@@ -3,6 +3,10 @@
 //! Implemented based on the paper "Efficient Graph-Based Image Segmentation" by
 //! Felzenszwalb and Huttenlocher (2004)
 
+pub mod pixel_grid;
+
+pub use pixel_grid::PixelGrid;
+
 use petgraph::visit::{Data, EdgeRef, GraphBase, IntoEdgeReferences, NodeIndexable};
 
 #[derive(Clone)]
@@ -19,7 +23,10 @@ enum ComponentSlot {
 
 #[non_exhaustive]
 pub struct Segmentation {
+    /// Map from node indexes to component indexes
     pub node_components: Vec<usize>,
+
+    /// Component metadata from the segmentation algorithm
     pub components: Vec<Component>,
 }
 
