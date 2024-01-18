@@ -2,9 +2,9 @@ use clap::Parser;
 use ffmpeg_next as ffmpeg;
 use image::{
     imageops::{flip_horizontal, flip_vertical, rotate90},
-    GrayImage, RgbImage, RgbaImage,
+    ColorType, DynamicImage, GrayImage, RgbImage, RgbaImage,
 };
-use image_hasher::{HasherConfig, ImageHash};
+use image_hasher::{HasherConfig, Image, ImageHash};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
