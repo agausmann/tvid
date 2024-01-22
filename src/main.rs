@@ -3,8 +3,10 @@ use clap::Parser;
 use fast_image_resize::{DynamicImageView, DynamicImageViewMut, ImageView, ImageViewMut, Resizer};
 use ffmpeg_next as ffmpeg;
 use image::{EncodableLayout, GrayImage};
-use image_hasher::{HasherConfig, ImageHash};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{Error, Unexpected},
+    Deserialize, Serialize,
+};
 use std::{
     cmp::Ordering,
     fs::File,
@@ -13,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+use tvid::{collect_bits, hash_decode, hash_distance, hash_encode, mean_hash};
 
 #[derive(Debug, clap::Parser)]
 struct Args {
@@ -66,43 +69,47 @@ fn main() -> anyhow::Result<()> {
 struct CompareResult {
     distance: u32,
     frame: u64,
+    hash: Hash,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Tvid {
-    hasher_config: HasherConfig,
-    hashes: Vec<SerdeImageHash>,
+    hashes: Vec<Hash>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SerdeImageHash(#[serde(with = "serde_image_hash")] ImageHash);
+type RawHash = [u8; 8];
 
-mod serde_image_hash {
-    use image_hasher::ImageHash;
-    use serde::{
-        de::{Error, Unexpected},
-        Deserialize, Deserializer, Serialize, Serializer,
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Hash(RawHash);
 
-    pub fn serialize<S: Serializer>(v: &ImageHash, serializer: S) -> Result<S::Ok, S::Error> {
-        v.to_base64().serialize(serializer)
+impl Serialize for Hash {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        hash_encode(&self.0).serialize(serializer)
     }
+}
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ImageHash, D::Error> {
-        String::deserialize(deserializer).and_then(|s| {
-            ImageHash::from_base64(&s)
-                .map_err(|_| D::Error::invalid_value(Unexpected::Str(&s), &"a base64 string"))
-        })
+impl<'de> Deserialize<'de> for Hash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let string = String::deserialize(deserializer)?;
+        let decoded = hash_decode(&string).map_err(|_| {
+            D::Error::invalid_value(Unexpected::Str(&string), &"a base64-encoded string")
+        })?;
+        let raw_hash = RawHash::try_from(decoded.as_slice())
+            .map_err(|_| D::Error::invalid_length(decoded.len(), &"8 bytes"))?;
+
+        Ok(Hash(raw_hash))
     }
 }
 
 fn hash(args: &HashArgs) -> anyhow::Result<()> {
     let hash_width = 8;
     let hash_height = 8;
-    let hasher_config = HasherConfig::new()
-        .hash_size(hash_width, hash_height)
-        .resize_filter(image_hasher::FilterType::Triangle);
-    let hasher = hasher_config.to_hasher();
 
     ffmpeg::init().unwrap();
     let mut ictx = ffmpeg::format::input(&args.video)?;
@@ -114,10 +121,6 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
 
     let context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
     let mut decoder = context_decoder.decoder().video()?;
-    // let mut threading_config = decoder.threading();
-    // threading_config.count = num_cpus::get();
-    // threading_config.kind = ffmpeg::threading::Type::Slice;
-    // decoder.set_threading(threading_config);
 
     let mut scaler = ffmpeg::software::scaling::context::Context::get(
         decoder.format(),
@@ -221,8 +224,9 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
                 //     .save(format!("data/debug/{frame_index}-resized.png"))
                 //     .unwrap();
 
-                let frame_hash = hasher.hash_image(&gray_image);
-                hashes.push(SerdeImageHash(frame_hash));
+                let mut hash = RawHash::default();
+                collect_bits(mean_hash(resized_image.as_bytes()), &mut hash);
+                hashes.push(Hash(hash));
                 dbg!(frame_index);
                 frame_index += 1;
             }
@@ -238,10 +242,7 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
     decoder.send_eof()?;
     receive_and_process_decoded_frames(&mut decoder)?;
 
-    let tvid = Tvid {
-        hasher_config,
-        hashes,
-    };
+    let tvid = Tvid { hashes };
 
     match &args.output {
         Some(path) => serde_json::to_writer(BufWriter::new(File::create(path)?), &tvid)?,
@@ -253,27 +254,59 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
 
 fn compare(tvid_path: &Path, image_path: &Path) -> anyhow::Result<()> {
     let tvid: Tvid = serde_json::from_reader(BufReader::new(File::open(tvid_path)?))?;
-    let image = image::open(image_path)?;
+    let gray_image = image::open(image_path)?.to_luma8();
 
-    let hasher = tvid.hasher_config.to_hasher();
-    let image_hash = hasher.hash_image(&image);
+    let hash_width = 8;
+    let hash_height = 8;
+
+    let mut resizer = Resizer::new(fast_image_resize::ResizeAlg::Convolution(
+        fast_image_resize::FilterType::Bilinear,
+    ));
+    let mut resized_image = GrayImage::new(hash_width, hash_height);
+    resizer
+        .resize(
+            &DynamicImageView::U8(
+                ImageView::from_buffer(
+                    NonZeroU32::new(gray_image.width()).unwrap(),
+                    NonZeroU32::new(gray_image.height()).unwrap(),
+                    gray_image.as_bytes(),
+                )
+                .unwrap(),
+            ),
+            &mut DynamicImageViewMut::U8(
+                ImageViewMut::from_buffer(
+                    NonZeroU32::new(resized_image.width()).unwrap(),
+                    NonZeroU32::new(resized_image.height()).unwrap(),
+                    resized_image.as_mut(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+
+    let mut image_hash = RawHash::default();
+    collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);
+    println!("base {:02x?}", image_hash);
 
     let mut results: Vec<CompareResult> = tvid
         .hashes
         .iter()
         .enumerate()
         .map(|(frame, hash)| CompareResult {
-            distance: hash.0.dist(&image_hash),
+            hash: *hash,
+            distance: hash_distance(&image_hash, &hash.0),
             frame: frame as u64,
         })
         .collect();
 
-    dbg!(&results[3700..3800]);
-
     results.sort();
 
-    dbg!(&results[..20]);
-    dbg!(&results[results.len() - 20..]);
+    for result in &results[..20] {
+        println!(
+            "{:02x?} dist {} frame {}",
+            result.hash, result.distance, result.frame
+        );
+    }
 
     Ok(())
 }
