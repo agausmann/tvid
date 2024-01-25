@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use clap::Parser;
 use fast_image_resize::{DynamicImageView, DynamicImageViewMut, ImageView, ImageViewMut, Resizer};
 use ffmpeg_next as ffmpeg;
@@ -15,10 +15,13 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use tvid::{collect_bits, hash_decode, hash_distance, hash_encode, mean_hash};
+use tvid::{collect_bits, hash_decode, hash_distance, hash_encode, mean_hash, tmdb::Tmdb};
 
 #[derive(Debug, clap::Parser)]
 struct Args {
+    #[clap(short, long)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -43,8 +46,18 @@ impl FromStr for Aspect {
 
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Command {
+    Search(SearchArgs),
     Hash(HashArgs),
     Compare { tvid: PathBuf, image: PathBuf },
+}
+
+#[derive(Debug, Clone, clap::Parser)]
+struct SearchArgs {
+    /// Filter by the year of the first air date.
+    #[clap(short, long)]
+    year: Option<i32>,
+
+    query: String,
 }
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -59,7 +72,12 @@ struct HashArgs {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    let raw_config =
+        std::fs::read_to_string(args.config.as_deref().unwrap_or(Path::new("tvid.toml")))?;
+    let config: tvid::config::Config = toml::from_str(&raw_config)?;
+
     match &args.command {
+        Command::Search(search_args) => search(&config, search_args),
         Command::Hash(hash_args) => hash(hash_args),
         Command::Compare { tvid, image } => compare(tvid, image),
     }
@@ -75,6 +93,17 @@ struct CompareResult {
 #[derive(Debug, Serialize, Deserialize)]
 struct Tvid {
     hashes: Vec<Hash>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Tvds {
+    episodes: Vec<Episode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Episode {
+    number: u32,
+    thumbnails: Vec<Hash>,
 }
 
 type RawHash = [u8; 8];
@@ -105,6 +134,19 @@ impl<'de> Deserialize<'de> for Hash {
 
         Ok(Hash(raw_hash))
     }
+}
+
+fn search(config: &tvid::config::Config, search_args: &SearchArgs) -> anyhow::Result<()> {
+    let tmdb = Tmdb::new(config);
+    let results = tmdb
+        .search(&search_args.query, search_args.year)
+        .map_err(|e| anyhow!("api error: {e:?}"))?;
+
+    for r in &results {
+        println!("{:8} - {}", r.id.unwrap(), r.name.as_ref().unwrap());
+    }
+
+    Ok(())
 }
 
 fn hash(args: &HashArgs) -> anyhow::Result<()> {

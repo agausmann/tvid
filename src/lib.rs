@@ -1,3 +1,6 @@
+pub mod config;
+pub mod tmdb;
+
 use base64::Engine;
 
 pub fn mean_hash(luma: &[u8]) -> impl Iterator<Item = bool> + '_ {

@@ -1,0 +1,6 @@
+# Get your API key here:
+# https://www.themoviedb.org/settings/api
+tmdb_api_key = ""
+
+#user_agent = ""
+#tmdb_path = ""
