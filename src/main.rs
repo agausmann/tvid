@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
-use fast_image_resize::{DynamicImageView, DynamicImageViewMut, ImageView, ImageViewMut, Resizer};
 use ffmpeg_next as ffmpeg;
 use image::{EncodableLayout, GrayImage};
 use serde::{
@@ -12,11 +11,10 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{stdout, BufReader, BufWriter, Read},
-    num::NonZeroU32,
     path::{Path, PathBuf},
     str::FromStr,
 };
-use tvid::{collect_bits, hash_decode, hash_distance, hash_encode, mean_hash, tmdb::Tmdb};
+use tvid::{collect_bits, hash_decode, hash_distance, hash_encode, mean_hash, tmdb::Tmdb, Resizer};
 
 #[derive(Debug, clap::Parser)]
 struct Args {
@@ -165,6 +163,9 @@ fn fetch(config: &tvid::config::Config, fetch_args: &FetchArgs) -> anyhow::Resul
 
     let season = tmdb.season_details(fetch_args.tvid, fetch_args.season)?;
 
+    let mut resizer = Resizer::new();
+    let mut resized_image = Default::default();
+
     let tvds = Tvds {
         episodes: season
             .episodes
@@ -184,33 +185,7 @@ fn fetch(config: &tvid::config::Config, fetch_args: &FetchArgs) -> anyhow::Resul
                                 let image = image::load_from_memory(&image_data)?;
                                 let gray_image = image.into_luma8();
 
-                                let hash_width = 8;
-                                let hash_height = 8;
-                                let mut resizer =
-                                    Resizer::new(fast_image_resize::ResizeAlg::Convolution(
-                                        fast_image_resize::FilterType::Bilinear,
-                                    ));
-                                let mut resized_image = GrayImage::new(hash_width, hash_height);
-                                resizer
-                                    .resize(
-                                        &DynamicImageView::U8(
-                                            ImageView::from_buffer(
-                                                NonZeroU32::new(gray_image.width()).unwrap(),
-                                                NonZeroU32::new(gray_image.height()).unwrap(),
-                                                gray_image.as_bytes(),
-                                            )
-                                            .unwrap(),
-                                        ),
-                                        &mut DynamicImageViewMut::U8(
-                                            ImageViewMut::from_buffer(
-                                                NonZeroU32::new(resized_image.width()).unwrap(),
-                                                NonZeroU32::new(resized_image.height()).unwrap(),
-                                                resized_image.as_mut(),
-                                            )
-                                            .unwrap(),
-                                        ),
-                                    )
-                                    .unwrap();
+                                resizer.resize(&gray_image, &mut resized_image);
 
                                 let mut image_hash = RawHash::default();
                                 collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);
@@ -243,9 +218,6 @@ fn fetch(config: &tvid::config::Config, fetch_args: &FetchArgs) -> anyhow::Resul
 }
 
 fn hash(args: &HashArgs) -> anyhow::Result<()> {
-    let hash_width = 8;
-    let hash_height = 8;
-
     ffmpeg::init().unwrap();
     let mut ictx = ffmpeg::format::input(&args.video)?;
     let input = ictx
@@ -296,10 +268,8 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
         Some((_, Ordering::Equal)) | None => (0, 0, decoder.width(), decoder.height()),
     };
 
-    let mut resizer = Resizer::new(fast_image_resize::ResizeAlg::Convolution(
-        fast_image_resize::FilterType::Bilinear,
-    ));
-    let mut resized_image = GrayImage::new(hash_width, hash_height);
+    let mut resizer = Resizer::new();
+    let mut resized_image = Default::default();
 
     let mut frame_index = 0;
 
@@ -335,26 +305,7 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
                 //     .save(format!("data/debug/{frame_index}.jpg"))
                 //     .unwrap();
 
-                resizer
-                    .resize(
-                        &DynamicImageView::U8(
-                            ImageView::from_buffer(
-                                NonZeroU32::new(gray_image.width()).unwrap(),
-                                NonZeroU32::new(gray_image.height()).unwrap(),
-                                gray_image.as_bytes(),
-                            )
-                            .unwrap(),
-                        ),
-                        &mut DynamicImageViewMut::U8(
-                            ImageViewMut::from_buffer(
-                                NonZeroU32::new(resized_image.width()).unwrap(),
-                                NonZeroU32::new(resized_image.height()).unwrap(),
-                                resized_image.as_mut(),
-                            )
-                            .unwrap(),
-                        ),
-                    )
-                    .unwrap();
+                resizer.resize(&gray_image, &mut resized_image);
                 // resized_image
                 //     .save(format!("data/debug/{frame_index}-resized.png"))
                 //     .unwrap();
@@ -391,33 +342,9 @@ fn compare(tvid_path: &Path, image_path: &Path) -> anyhow::Result<()> {
     let tvid: Tvid = serde_json::from_reader(BufReader::new(File::open(tvid_path)?))?;
     let gray_image = image::open(image_path)?.to_luma8();
 
-    let hash_width = 8;
-    let hash_height = 8;
-
-    let mut resizer = Resizer::new(fast_image_resize::ResizeAlg::Convolution(
-        fast_image_resize::FilterType::Bilinear,
-    ));
-    let mut resized_image = GrayImage::new(hash_width, hash_height);
-    resizer
-        .resize(
-            &DynamicImageView::U8(
-                ImageView::from_buffer(
-                    NonZeroU32::new(gray_image.width()).unwrap(),
-                    NonZeroU32::new(gray_image.height()).unwrap(),
-                    gray_image.as_bytes(),
-                )
-                .unwrap(),
-            ),
-            &mut DynamicImageViewMut::U8(
-                ImageViewMut::from_buffer(
-                    NonZeroU32::new(resized_image.width()).unwrap(),
-                    NonZeroU32::new(resized_image.height()).unwrap(),
-                    resized_image.as_mut(),
-                )
-                .unwrap(),
-            ),
-        )
-        .unwrap();
+    let mut resizer = Resizer::new();
+    let mut resized_image = Default::default();
+    resizer.resize(&gray_image, &mut resized_image);
 
     let mut image_hash = RawHash::default();
     collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);

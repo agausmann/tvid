@@ -1,7 +1,54 @@
 pub mod config;
 pub mod tmdb;
 
+use std::num::NonZeroU32;
+
 use base64::Engine;
+use fast_image_resize::{DynamicImageView, DynamicImageViewMut, ImageView, ImageViewMut};
+use image::{EncodableLayout, GrayImage};
+
+pub struct Resizer {
+    inner: fast_image_resize::Resizer,
+}
+
+impl Resizer {
+    pub fn new() -> Self {
+        Resizer {
+            inner: fast_image_resize::Resizer::new(fast_image_resize::ResizeAlg::Convolution(
+                fast_image_resize::FilterType::Bilinear,
+            )),
+        }
+    }
+
+    pub fn resize(&mut self, inp: &GrayImage, out: &mut GrayImage) {
+        let hash_width = 8;
+        let hash_height = 8;
+        if out.width() != hash_width || out.height() != hash_height {
+            // Reallocate
+            *out = GrayImage::new(hash_width, hash_height);
+        }
+        self.inner
+            .resize(
+                &DynamicImageView::U8(
+                    ImageView::from_buffer(
+                        NonZeroU32::new(inp.width()).unwrap(),
+                        NonZeroU32::new(out.height()).unwrap(),
+                        inp.as_bytes(),
+                    )
+                    .unwrap(),
+                ),
+                &mut DynamicImageViewMut::U8(
+                    ImageViewMut::from_buffer(
+                        NonZeroU32::new(out.width()).unwrap(),
+                        NonZeroU32::new(out.height()).unwrap(),
+                        out.as_mut(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+    }
+}
 
 pub fn mean_hash(luma: &[u8]) -> impl Iterator<Item = bool> + '_ {
     let mean = luma.iter().map(|&l| l as f32).sum::<f32>() / luma.len() as f32;
