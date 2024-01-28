@@ -48,6 +48,7 @@ enum Command {
     Search(SearchArgs),
     Fetch(FetchArgs),
     Hash(HashArgs),
+    Identify(IdentifyArgs),
     Compare { tvid: PathBuf, image: PathBuf },
 }
 
@@ -78,6 +79,20 @@ struct HashArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, clap::Parser)]
+struct IdentifyArgs {
+    tvid: PathBuf,
+    tvds: PathBuf,
+
+    // Maximum episode number
+    #[clap(short('m'), long)]
+    min: Option<i32>,
+
+    // Minimum episode number
+    #[clap(short('M'), long)]
+    max: Option<i32>,
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -89,8 +104,15 @@ fn main() -> anyhow::Result<()> {
         Command::Search(search_args) => search(&config, search_args),
         Command::Fetch(fetch_args) => fetch(&config, fetch_args),
         Command::Hash(hash_args) => hash(hash_args),
+        Command::Identify(identify_args) => identify(identify_args),
         Command::Compare { tvid, image } => compare(tvid, image),
     }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IdResult {
+    mse: u32,
+    episode: i32,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -333,6 +355,50 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
     match &args.output {
         Some(path) => serde_json::to_writer(BufWriter::new(File::create(path)?), &tvid)?,
         None => serde_json::to_writer(stdout(), &tvid)?,
+    }
+
+    Ok(())
+}
+
+fn identify(identify_args: &IdentifyArgs) -> anyhow::Result<()> {
+    let tvid: Tvid = serde_json::from_reader(BufReader::new(File::open(&identify_args.tvid)?))?;
+    let tvds: Tvds = serde_json::from_reader(BufReader::new(File::open(&identify_args.tvds)?))?;
+
+    let mut result: Vec<IdResult> = tvds
+        .episodes
+        .into_iter()
+        .filter(|&(ep_id, _)| {
+            identify_args.min.map(|min| ep_id >= min).unwrap_or(true)
+                && identify_args.max.map(|max| ep_id <= max).unwrap_or(true)
+        })
+        .map(|(ep_id, ep)| {
+            let squared_error: u32 = ep
+                .thumbnails
+                .iter()
+                .map(|thumb_hash| {
+                    let distance = tvid
+                        .hashes
+                        .iter()
+                        .map(|tv_hash| hash_distance(&tv_hash.0, &thumb_hash.0))
+                        .min()
+                        .unwrap();
+
+                    eprintln!("{} {}", ep_id, distance);
+                    distance * distance
+                })
+                .sum();
+            let mse = squared_error * 1000 / (ep.thumbnails.len() as u32);
+            IdResult {
+                mse,
+                episode: ep_id,
+            }
+        })
+        .collect();
+
+    result.sort();
+
+    for r in result {
+        println!("{:?}", r);
     }
 
     Ok(())
