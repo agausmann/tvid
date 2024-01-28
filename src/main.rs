@@ -9,6 +9,7 @@ use serde::{
 };
 use std::{
     cmp::Ordering,
+    collections::HashMap,
     fs::File,
     io::{stdout, BufReader, BufWriter, Read},
     num::NonZeroU32,
@@ -108,12 +109,11 @@ struct Tvid {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Tvds {
-    episodes: Vec<Episode>,
+    episodes: HashMap<i32, Episode>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Episode {
-    number: u32,
     thumbnails: Vec<Hash>,
 }
 
@@ -170,68 +170,70 @@ fn fetch(config: &tvid::config::Config, fetch_args: &FetchArgs) -> anyhow::Resul
             .episodes
             .into_iter()
             .map(|ep| {
-                Ok(Episode {
-                    number: ep.episode_number.try_into().unwrap(),
-                    thumbnails: tmdb
-                        .episode_images(fetch_args.tvid, fetch_args.season, ep.episode_number)?
-                        .stills
-                        .into_iter()
-                        .map(|image_ref| -> anyhow::Result<Hash> {
-                            let mut image_data = Vec::new();
-                            let image_reader = tmdb.get_image(&image_ref.file_path)?;
-                            image_reader.take(1 << 30).read_to_end(&mut image_data)?;
-                            let image = image::load_from_memory(&image_data)?;
-                            let gray_image = image.into_luma8();
+                Ok((
+                    ep.episode_number,
+                    Episode {
+                        thumbnails: tmdb
+                            .episode_images(fetch_args.tvid, fetch_args.season, ep.episode_number)?
+                            .stills
+                            .into_iter()
+                            .map(|image_ref| -> anyhow::Result<Hash> {
+                                let mut image_data = Vec::new();
+                                let image_reader = tmdb.get_image(&image_ref.file_path)?;
+                                image_reader.take(1 << 30).read_to_end(&mut image_data)?;
+                                let image = image::load_from_memory(&image_data)?;
+                                let gray_image = image.into_luma8();
 
-                            let hash_width = 8;
-                            let hash_height = 8;
-                            let mut resizer =
-                                Resizer::new(fast_image_resize::ResizeAlg::Convolution(
-                                    fast_image_resize::FilterType::Bilinear,
-                                ));
-                            let mut resized_image = GrayImage::new(hash_width, hash_height);
-                            resizer
-                                .resize(
-                                    &DynamicImageView::U8(
-                                        ImageView::from_buffer(
-                                            NonZeroU32::new(gray_image.width()).unwrap(),
-                                            NonZeroU32::new(gray_image.height()).unwrap(),
-                                            gray_image.as_bytes(),
-                                        )
-                                        .unwrap(),
-                                    ),
-                                    &mut DynamicImageViewMut::U8(
-                                        ImageViewMut::from_buffer(
-                                            NonZeroU32::new(resized_image.width()).unwrap(),
-                                            NonZeroU32::new(resized_image.height()).unwrap(),
-                                            resized_image.as_mut(),
-                                        )
-                                        .unwrap(),
-                                    ),
-                                )
-                                .unwrap();
+                                let hash_width = 8;
+                                let hash_height = 8;
+                                let mut resizer =
+                                    Resizer::new(fast_image_resize::ResizeAlg::Convolution(
+                                        fast_image_resize::FilterType::Bilinear,
+                                    ));
+                                let mut resized_image = GrayImage::new(hash_width, hash_height);
+                                resizer
+                                    .resize(
+                                        &DynamicImageView::U8(
+                                            ImageView::from_buffer(
+                                                NonZeroU32::new(gray_image.width()).unwrap(),
+                                                NonZeroU32::new(gray_image.height()).unwrap(),
+                                                gray_image.as_bytes(),
+                                            )
+                                            .unwrap(),
+                                        ),
+                                        &mut DynamicImageViewMut::U8(
+                                            ImageViewMut::from_buffer(
+                                                NonZeroU32::new(resized_image.width()).unwrap(),
+                                                NonZeroU32::new(resized_image.height()).unwrap(),
+                                                resized_image.as_mut(),
+                                            )
+                                            .unwrap(),
+                                        ),
+                                    )
+                                    .unwrap();
 
-                            let mut image_hash = RawHash::default();
-                            collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);
+                                let mut image_hash = RawHash::default();
+                                collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);
 
-                            Ok(Hash(image_hash))
-                        })
-                        .flat_map(|result| match result {
-                            Ok(x) => Some(x),
-                            Err(e) => {
-                                eprintln!("error loading image: {:?}", e);
-                                None
-                            }
-                        })
-                        .collect(),
-                })
+                                Ok(Hash(image_hash))
+                            })
+                            .flat_map(|result| match result {
+                                Ok(x) => Some(x),
+                                Err(e) => {
+                                    eprintln!("error loading image: {:?}", e);
+                                    None
+                                }
+                            })
+                            .collect(),
+                    },
+                ))
             })
             .collect::<anyhow::Result<_>>()?,
     };
 
     serde_json::to_writer(
         BufWriter::new(File::create(format!(
-            "{}S{:02}.tvds",
+            "{}s{:02}.tvds",
             fetch_args.tvid, fetch_args.season
         ))?),
         &tvds,
