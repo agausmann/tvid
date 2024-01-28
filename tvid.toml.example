@@ -1,6 +1,4 @@
 # Get your API key here:
 # https://www.themoviedb.org/settings/api
 tmdb_api_key = ""
-
-#user_agent = ""
-#tmdb_path = ""
+user_agent = "tvid/0.0 +https://github.com/agausmann/tvid"

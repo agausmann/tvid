@@ -1,123 +1,121 @@
-use std::{
-    io::{Read, Write},
-    rc::Rc,
-};
+use std::io::Read;
 
-use tmdb_client::{
-    apis::{
-        configuration::Configuration, ConfigurationApi, ConfigurationApiClient, SearchApi,
-        SearchApiClient, TVSeasonsApi, TVSeasonsApiClient,
-    },
-    models::{self, Image, TvObject},
-};
+use serde::Deserialize;
+use ureq::{Agent, AgentBuilder, Request};
 
 use crate::config::Config;
 
 pub struct Tmdb {
-    configuration: ConfigurationApiClient,
-    search: SearchApiClient,
-    seasons: TVSeasonsApiClient,
-    server_config: Option<models::Configuration>,
+    agent: Agent,
+    api_key: String,
+    server_config: Option<ServerConfig>,
 }
 
 impl Tmdb {
     pub fn new(config: &Config) -> Self {
-        let mut api_config = Configuration::default();
-        api_config.api_key = Some(config.tmdb_api_key.clone());
-        api_config.user_agent = Some(config.user_agent().to_string());
-        if let Some(base_path) = &config.tmdb_path {
-            api_config.base_path = base_path.clone();
-        }
-        let api_config = Rc::new(api_config);
-
         Self {
-            configuration: ConfigurationApiClient::new(Rc::clone(&api_config)),
-            search: SearchApiClient::new(Rc::clone(&api_config)),
-            seasons: TVSeasonsApiClient::new(Rc::clone(&api_config)),
+            agent: AgentBuilder::new().user_agent(&config.user_agent).build(),
+            api_key: config.tmdb_api_key.clone(),
             server_config: None,
         }
     }
 
-    pub fn search(
-        &self,
-        query: &str,
-        first_air_date_year: Option<i32>,
-    ) -> Result<Vec<TvObject>, tmdb_client::Error> {
-        self.search
-            .get_search_tv_paginated(query, first_air_date_year, None, None)
-            .map(|paginated| paginated.results.unwrap_or(Vec::new()))
+    pub fn search(&self, query: &str, year: Option<i32>) -> anyhow::Result<Vec<SearchResult>> {
+        #[derive(Deserialize)]
+        struct Response {
+            results: Vec<SearchResult>,
+        }
+        let mut req = self.get("search/tv").query("query", query);
+        if let Some(year) = year {
+            req = req.query("year", &year.to_string());
+        }
+        let response: Response = req.call()?.into_json()?;
+        Ok(response.results)
     }
 
-    pub fn get_season_images(
+    pub fn season_details(&self, tv_id: i32, season_number: i32) -> anyhow::Result<SeasonDetails> {
+        let response = self
+            .get(&format!("tv/{tv_id}/season/{season_number}"))
+            .call()?
+            .into_json()?;
+        Ok(response)
+    }
+
+    pub fn episode_images(
         &self,
         tv_id: i32,
         season_number: i32,
-    ) -> Result<Vec<EpisodeImages>, tmdb_client::Error> {
-        let details = self
-            .seasons
-            .get_tv_season_details(tv_id, season_number, None, None, None)?;
-
-        let episodes = details
-            .episodes
-            .into_iter()
-            .flatten()
-            .map(|ep| EpisodeImages {
-                episode_number: ep.episode_number.unwrap(),
-                images: ep
-                    .images
-                    .into_iter()
-                    .flat_map(|images| images.backdrops.unwrap_or(Vec::new()))
-                    .collect(),
-            })
-            .collect();
-
-        Ok(episodes)
+        episode_number: i32,
+    ) -> anyhow::Result<EpisodeImages> {
+        let response = self
+            .get(&format!(
+                "tv/{tv_id}/season/{season_number}/episode/{episode_number}/images"
+            ))
+            .call()?
+            .into_json()?;
+        Ok(response)
     }
 
-    pub fn get_image<W: Write>(
+    pub fn get_image(
         &mut self,
-        image: &Image,
-        writer: &mut W,
-    ) -> Result<u64, GetImageError> {
-        let image_url = self.image_url(image).map_err(GetImageError::Tmdb)?;
-        let response = ureq::get(&image_url).call().map_err(GetImageError::Ureq)?;
-        let size_limit = 1 << 30; // 1 GiB;
-        let mut reader = response.into_reader().take(size_limit);
-        let written = std::io::copy(&mut reader, writer).map_err(GetImageError::Io)?;
+        path: &str,
+    ) -> anyhow::Result<Box<dyn Read + Send + Sync + 'static>> {
+        let base_url = self.server_config()?.images.secure_base_url.clone();
+        let reader = self
+            .agent
+            .get(&format!("{}/original/{}", base_url, path))
+            .call()?
+            .into_reader();
 
-        if written < size_limit {
-            Ok(written)
-        } else {
-            Err(GetImageError::Overrun)
-        }
+        Ok(reader)
     }
 
-    fn image_url(&mut self, image: &Image) -> Result<String, tmdb_client::Error> {
-        let config = self.server_config()?.images.as_ref().unwrap();
-        Ok(format!(
-            "{}/original/{}",
-            config.base_url.as_ref().unwrap(),
-            image.file_path.as_ref().unwrap()
-        ))
-    }
-
-    fn server_config(&mut self) -> Result<&models::Configuration, tmdb_client::Error> {
+    fn server_config(&mut self) -> anyhow::Result<&ServerConfig> {
         if self.server_config.is_none() {
-            self.server_config = Some(self.configuration.get_configuration(None)?);
+            self.server_config = Some(self.get("configuration").call()?.into_json()?);
         }
         Ok(self.server_config.as_ref().unwrap())
     }
+
+    fn get(&self, path: &str) -> Request {
+        self.agent
+            .get(&format!("https://api.themoviedb.org/3/{}", path))
+            .query("api_key", &self.api_key)
+    }
 }
 
-pub enum GetImageError {
-    Tmdb(tmdb_client::Error),
-    Ureq(ureq::Error),
-    Io(std::io::Error),
-    Overrun,
+#[derive(Deserialize)]
+pub struct SearchResult {
+    pub id: i32,
+    pub name: String,
 }
 
-#[non_exhaustive]
-pub struct EpisodeImages {
+#[derive(Deserialize)]
+pub struct SeasonDetails {
+    pub episodes: Vec<SeasonEpisode>,
+}
+
+#[derive(Deserialize)]
+pub struct SeasonEpisode {
     pub episode_number: i32,
-    pub images: Vec<Image>,
+}
+
+#[derive(Deserialize)]
+pub struct EpisodeImages {
+    pub stills: Vec<Image>,
+}
+
+#[derive(Deserialize)]
+pub struct Image {
+    pub file_path: String,
+}
+
+#[derive(Deserialize)]
+struct ServerConfig {
+    images: ImagesConfig,
+}
+
+#[derive(Deserialize)]
+struct ImagesConfig {
+    secure_base_url: String,
 }
