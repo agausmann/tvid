@@ -1,11 +1,8 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
 use ffmpeg_next as ffmpeg;
-use image::{EncodableLayout, GrayImage};
-use serde::{
-    de::{Error, Unexpected},
-    Deserialize, Serialize,
-};
+use image::GrayImage;
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::HashMap,
@@ -14,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use tvid::{collect_bits, hash_decode, hash_distance, hash_encode, mean_hash, tmdb::Tmdb, Resizer};
+use tvid::{tmdb::Tmdb, GradientHash, Hash};
 
 #[derive(Debug, clap::Parser)]
 struct Args {
@@ -137,36 +134,6 @@ struct Episode {
     thumbnails: Vec<Hash>,
 }
 
-type RawHash = [u8; 8];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Hash(RawHash);
-
-impl Serialize for Hash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        hash_encode(&self.0).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Hash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let string = String::deserialize(deserializer)?;
-        let decoded = hash_decode(&string).map_err(|_| {
-            D::Error::invalid_value(Unexpected::Str(&string), &"a base64-encoded string")
-        })?;
-        let raw_hash = RawHash::try_from(decoded.as_slice())
-            .map_err(|_| D::Error::invalid_length(decoded.len(), &"8 bytes"))?;
-
-        Ok(Hash(raw_hash))
-    }
-}
-
 fn search(config: &tvid::config::Config, search_args: &SearchArgs) -> anyhow::Result<()> {
     let tmdb = Tmdb::new(config);
     let results = tmdb
@@ -185,8 +152,7 @@ fn fetch(config: &tvid::config::Config, fetch_args: &FetchArgs) -> anyhow::Resul
 
     let season = tmdb.season_details(fetch_args.tvid, fetch_args.season)?;
 
-    let mut resizer = Resizer::new();
-    let mut resized_image = Default::default();
+    let mut hasher = GradientHash::new();
 
     let tvds = Tvds {
         episodes: season
@@ -207,12 +173,7 @@ fn fetch(config: &tvid::config::Config, fetch_args: &FetchArgs) -> anyhow::Resul
                                 let image = image::load_from_memory(&image_data)?;
                                 let gray_image = image.into_luma8();
 
-                                resizer.resize(&gray_image, &mut resized_image);
-
-                                let mut image_hash = RawHash::default();
-                                collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);
-
-                                Ok(Hash(image_hash))
+                                Ok(hasher.hash(&gray_image))
                             })
                             .flat_map(|result| match result {
                                 Ok(x) => Some(x),
@@ -290,8 +251,7 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
         Some((_, Ordering::Equal)) | None => (0, 0, decoder.width(), decoder.height()),
     };
 
-    let mut resizer = Resizer::new();
-    let mut resized_image = Default::default();
+    let mut hasher = GradientHash::new();
 
     let mut frame_index = 0;
 
@@ -314,27 +274,10 @@ fn hash(args: &HashArgs) -> anyhow::Result<()> {
                             [..dest_stride],
                     );
                 }
-                // let mut file = File::create(format!("data/debug/{}.ppm", frame_index)).unwrap();
-                // file.write_all(
-                //     format!("P6\n{} {}\n255\n", rgb_frame.width(), rgb_frame.height()).as_bytes(),
-                // )
-                // .unwrap();
-                // file.write_all(&packed).unwrap();
-
                 let gray_image =
                     GrayImage::from_raw(crop_width, crop_height, pack_and_crop).unwrap();
-                // gray_image
-                //     .save(format!("data/debug/{frame_index}.jpg"))
-                //     .unwrap();
 
-                resizer.resize(&gray_image, &mut resized_image);
-                // resized_image
-                //     .save(format!("data/debug/{frame_index}-resized.png"))
-                //     .unwrap();
-
-                let mut hash = RawHash::default();
-                collect_bits(mean_hash(resized_image.as_bytes()), &mut hash);
-                hashes.push(Hash(hash));
+                hashes.push(hasher.hash(&gray_image));
                 dbg!(frame_index);
                 frame_index += 1;
             }
@@ -379,7 +322,7 @@ fn identify(identify_args: &IdentifyArgs) -> anyhow::Result<()> {
                     let distance = tvid
                         .hashes
                         .iter()
-                        .map(|tv_hash| hash_distance(&tv_hash.0, &thumb_hash.0))
+                        .map(|tv_hash| tv_hash.distance(&thumb_hash))
                         .min()
                         .unwrap();
 
@@ -408,12 +351,9 @@ fn compare(tvid_path: &Path, image_path: &Path) -> anyhow::Result<()> {
     let tvid: Tvid = serde_json::from_reader(BufReader::new(File::open(tvid_path)?))?;
     let gray_image = image::open(image_path)?.to_luma8();
 
-    let mut resizer = Resizer::new();
-    let mut resized_image = Default::default();
-    resizer.resize(&gray_image, &mut resized_image);
+    let mut hasher = GradientHash::new();
 
-    let mut image_hash = RawHash::default();
-    collect_bits(mean_hash(resized_image.as_bytes()), &mut image_hash);
+    let image_hash = hasher.hash(&gray_image);
     println!("base {:02x?}", image_hash);
 
     let mut results: Vec<CompareResult> = tvid
@@ -422,7 +362,7 @@ fn compare(tvid_path: &Path, image_path: &Path) -> anyhow::Result<()> {
         .enumerate()
         .map(|(frame, hash)| CompareResult {
             hash: *hash,
-            distance: hash_distance(&image_hash, &hash.0),
+            distance: image_hash.distance(&hash),
             frame: frame as u64,
         })
         .collect();
